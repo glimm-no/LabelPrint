@@ -1549,7 +1549,7 @@ internal static class StartupTaskRegistrar
             //       watcher does not need elevated privileges.
             var createArgs = $"/Create /TN \"{TaskName}\" /TR \"\\\"{exePath}\\\" {arguments}\" " +
                              $"/SC ONLOGON /DELAY 0000:01 /F";
-
+            
             RunSchtasks(createArgs);
 
             Console.WriteLine($"✓ Startup task '{TaskName}' registered.");
@@ -1600,7 +1600,9 @@ internal static class StartupTaskRegistrar
         var stderr = proc.StandardError.ReadToEnd();
         proc.WaitForExit();
 
-        if (proc.ExitCode != 0 && !stdout.Contains("does not exist", StringComparison.OrdinalIgnoreCase))
+        var notFound = stdout.Contains("system cannot find the file specified", StringComparison.OrdinalIgnoreCase)
+                    || stderr.Contains("system cannot find the file specified", StringComparison.OrdinalIgnoreCase);
+        if (proc.ExitCode != 0 && !notFound)
         {
             var parts = new[] { stdout.Trim(), stderr.Trim() }.Where(s => !string.IsNullOrEmpty(s));
             var msg = string.Join(" | ", parts);
