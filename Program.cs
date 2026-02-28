@@ -1006,10 +1006,12 @@ internal static class WatchMode
             cts.Cancel();
         };
 
+        var dedup = new ContentDeduplicator(TimeSpan.FromSeconds(60));
+
         // Process any PDFs already sitting in the folder at startup.
         foreach (var existing in Directory.GetFiles(folder, "*.pdf"))
         {
-            await ProcessFileAsync(existing, options).ConfigureAwait(false);
+            await ProcessFileAsync(existing, options, dedup).ConfigureAwait(false);
         }
 
         using var watcher = new FileSystemWatcher(folder, "*.pdf")
@@ -1029,7 +1031,7 @@ internal static class WatchMode
             {
                 // Brief settle delay so the writer has finished before we open the file.
                 await Task.Delay(SettleDelay, cts.Token).ConfigureAwait(false);
-                await ProcessFileAsync(path, options).ConfigureAwait(false);
+                await ProcessFileAsync(path, options, dedup).ConfigureAwait(false);
             }
             else
             {
@@ -1041,7 +1043,7 @@ internal static class WatchMode
         return 0;
     }
 
-    private static async Task ProcessFileAsync(string path, LabelPrintOptions options)
+    private static async Task ProcessFileAsync(string path, LabelPrintOptions options, ContentDeduplicator dedup)
     {
         if (!File.Exists(path))
         {
@@ -1049,10 +1051,19 @@ internal static class WatchMode
         }
 
         Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Detected: {Path.GetFileName(path)}");
+
+        if (dedup.IsDuplicate(path, out var hash))
+        {
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Skipping duplicate: {Path.GetFileName(path)}");
+            try { File.Delete(path); } catch { /* best-effort */ }
+            return;
+        }
+
         try
         {
             var printOptions = options with { PdfPath = path };
             await Program.PrintPdfAsync(printOptions).ConfigureAwait(false);
+            dedup.MarkPrinted(hash);
 
             // Delete after successful print so the folder stays clean.
             try { File.Delete(path); } catch { /* best-effort */ }
@@ -1065,6 +1076,41 @@ internal static class WatchMode
             Directory.CreateDirectory(errorDir);
             var dest = Path.Combine(errorDir, Path.GetFileName(path));
             try { File.Move(path, dest, overwrite: true); } catch { /* best-effort */ }
+        }
+    }
+
+    /// <summary>
+    /// Tracks MD5 hashes of recently printed file contents.
+    /// Any file whose content was already printed within <c>_window</c> is considered a duplicate.
+    /// </summary>
+    private sealed class ContentDeduplicator
+    {
+        private readonly TimeSpan _window;
+        private readonly Dictionary<string, DateTime> _seen = new();
+
+        public ContentDeduplicator(TimeSpan window) => _window = window;
+
+        /// <summary>
+        /// Returns <c>true</c> when the file's content was already printed within the dedup window.
+        /// Always sets <paramref name="hash"/> so the caller can pass it to <see cref="MarkPrinted"/>.
+        /// </summary>
+        public bool IsDuplicate(string filePath, out string hash)
+        {
+            hash = ComputeHash(filePath);
+            var now = DateTime.UtcNow;
+            // Purge stale entries so the dictionary doesn't grow unbounded.
+            foreach (var stale in _seen.Where(kv => now - kv.Value > _window).Select(kv => kv.Key).ToList())
+                _seen.Remove(stale);
+            return _seen.ContainsKey(hash);
+        }
+
+        public void MarkPrinted(string hash) => _seen[hash] = DateTime.UtcNow;
+
+        private static string ComputeHash(string filePath)
+        {
+            using var md5 = System.Security.Cryptography.MD5.Create();
+            using var stream = File.OpenRead(filePath);
+            return Convert.ToHexString(md5.ComputeHash(stream));
         }
     }
 }
